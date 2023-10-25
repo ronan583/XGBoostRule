@@ -19,7 +19,7 @@ import java.util.Random;
  * interface because the values of the Hessian for each instance are provided to the base learner as instance
  * weights. The class values of the instances passed to the base learner are the corresponding negative gradients.
  */
-public class XGBoost extends RandomizableIteratedSingleClassifierEnhancer implements AdditionalMeasureProducer {
+public class XGBoostR extends RandomizableIteratedSingleClassifierEnhancer implements AdditionalMeasureProducer {
 
     /**  Returns the capabilities of the classifier: numeric predictors and numeric or binary classes. */
     public Capabilities getCapabilities() {
@@ -37,10 +37,10 @@ public class XGBoost extends RandomizableIteratedSingleClassifierEnhancer implem
     }
 
     /** String describing default classifier. */
-    protected String defaultClassifierString() { return "weka.classifiers.trees.XGBoostTree"; }
+    protected String defaultClassifierString() { return "weka.classifiers.rule.XGBoostRule"; }
 
     /** Default constructor setting the default classifier. */
-    public XGBoost() { m_Classifier = new weka.classifiers.trees.XGBoostTree(); }
+    public XGBoostR() { m_Classifier = new weka.classifiers.rules.XGBoostRule(); }
 
     /**
      * Provides an enumeration of the additional measures supplied by the base learner (if any).

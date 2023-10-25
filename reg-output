@@ -1,0 +1,33 @@
+Tester:     weka.experiment.PairedCorrectedTTester -G 4,5,6 -D 1 -R 2 -S 0.05 -result-matrix "weka.experiment.ResultMatrixPlainText -mean-prec 2 -stddev-prec 2 -col-name-width 0 -row-name-width 25 -mean-width 3 -stddev-width 2 -sig-width 1 -count-width 5 -print-col-names -print-row-names -enum-col-names"
+Analysing:  Root_relative_squared_error
+Datasets:   14
+Resultsets: 2
+Confidence: 0.05 (two tailed)
+Sorted by:  -
+Date:       2023/10/19 下午6:02
+
+
+Dataset                   (1) sklearn.S | (2) meta.X
+----------------------------------------------------
+2dplanes                 (100)    23.12 |    68.93 v
+bank8FM                  (100)    20.51 |    34.84 v
+cpu_act                  (100)    13.04 |    50.13 v
+cpu_small                (100)    15.26 |    40.31 v
+delta_ailerons           (100)    56.51 |   100.00 v
+delta_elevators          (100)    60.57 |   100.00 v
+diabetes_numeric         (100)   107.21 |    90.46  
+kin8nm                   (100)    48.13 |    74.10 v
+machine_cpu              (100)    36.01 |    39.88  
+puma8NH                  (100)    59.56 |    59.41  
+pyrim                    (100)    74.67 |   100.23  
+stock                    (100)    12.75 |    21.51 v
+triazines                (100)    80.09 |   100.08 v
+wisconsin                (100)   106.28 |   111.54  
+----------------------------------------------------
+                                (v/ /*) |    (9/5/0)
+
+
+Key:
+(1) sklearn.ScikitLearnClassifier '-batch 100 -learner XGBRegressor -py-command python3 -py-path C:\\Users\\aiden\\AppData\\Local\\Programs\\Python\\Python311\\python.exe -server-name none' -6212485658537766441
+(2) meta.XGBoostR '-S 1 -I 100 -W rules.XGBoostRule -- -S 1 -colsample_bynode 0.5 -eta 0.3 -gamma 1.0 -lambda 1.0 -max_depth 6 -min_child_weight 1.0 -subsample 0.5' -2115384132442756489
+

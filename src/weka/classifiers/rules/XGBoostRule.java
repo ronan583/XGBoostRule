@@ -1,13 +1,12 @@
 package weka.classifiers.rules;
 
-import weka.classifiers.Classifier;
 import weka.classifiers.RandomizableClassifier;
 import weka.core.*;
 
 import java.io.Serializable;
+import java.sql.Array;
 import java.util.*;
 import java.util.stream.IntStream;
-import java.util.stream.Collectors;
 
 /**
  * Basic WEKA classifiers (and this includes learning algorithms that build regression models!)
@@ -98,10 +97,10 @@ public class XGBoostRule extends RandomizableClassifier implements WeightedInsta
      */
     private interface Node { }
 
-    private record InternalNode(Attribute attribute, double splitPoint, Node leftSuccessor, Node rightSuccessor)
+    private record AntecedentNode(Attribute attribute, double splitPoint, Node successor, String lessOrGreater)
             implements Node, Serializable { }
 
-    private record LeafNode(double prediction) implements Node, Serializable { }
+    private record ConsequenceNode(double prediction) implements Node, Serializable { }
 
     /**
      * The root node of the decision tree.
@@ -117,19 +116,23 @@ public class XGBoostRule extends RandomizableClassifier implements WeightedInsta
      * Random number generator to be used for subsampling rows and columns.
      */
     Random random;
+    String LESS = "<=";
+    String GREATER = ">";
 
     /**
      * A class for objects that hold a split specification, including the quality of the split.
      */
-    private class SplitSpecification {
+    private class AntecedentSpecification {
         private final Attribute attribute;
         private double splitPoint;
         private double splitQuality;
+        private String lessOrGreater;
 
-        private SplitSpecification(Attribute attribute, double splitQuality, double splitPoint) {
+        private AntecedentSpecification(Attribute attribute, double splitQuality, double splitPoint, String lessOrGreater) {
             this.attribute = attribute;
             this.splitQuality = splitQuality;
             this.splitPoint = splitPoint;
+            this.lessOrGreater = lessOrGreater;
         }
     }
 
@@ -166,8 +169,9 @@ public class XGBoostRule extends RandomizableClassifier implements WeightedInsta
      * the variable l holds the sufficient statistics for the left branch, and the variable r hold the sufficient
      * statistics for the right branch.
      */
-    private double splitQuality(SufficientStatistics i, SufficientStatistics l, SufficientStatistics r) {
-        return 0.5 * (impurity(l) + impurity(r) - impurity(i)) - gamma;
+    private double ruleMetric(SufficientStatistics i, int ruleNum) {
+//        return 0.5 * (impurity(l) + impurity(r) - impurity(i)) - gamma;
+        return 0.5 * i.sumOfNegativeGradients * i.sumOfNegativeGradients / (i.sumOfHessians + lambda) - gamma * ruleNum;
     }
 
     /**
@@ -175,75 +179,97 @@ public class XGBoostRule extends RandomizableClassifier implements WeightedInsta
      * define the subset of the training set for which the split is to be found. The initialStats are the sufficient
      * statistics before the data is split.
      */
-    private SplitSpecification findBestSplitPoint(int[] indices, Attribute attribute, SufficientStatistics initialStats) {
-        var statsLeft = new SufficientStatistics(0.0, 0.0);
-        var statsRight = new SufficientStatistics(initialStats.sumOfNegativeGradients, initialStats.sumOfHessians);
-        var splitSpecification = new SplitSpecification(attribute, 1e-6, Double.NEGATIVE_INFINITY);
+    private AntecedentSpecification findBestAntecedent(int[] indices, Attribute attribute, SufficientStatistics initialStats, int ruleNum) {
+        var statsLess = new SufficientStatistics(0.0,0.0);
+        var statsGreater = new SufficientStatistics(initialStats.sumOfNegativeGradients, initialStats.sumOfHessians);
+        var antecedentSpecification = new AntecedentSpecification(attribute, 1e-6, Double.NEGATIVE_INFINITY, LESS);
         var previousValue = Double.NEGATIVE_INFINITY;
-        for (int i : Arrays.stream(Utils.sortWithNoMissingValues(Arrays.stream(indices).mapToDouble(x ->
-                data.instance(x).value(attribute)).toArray())).map(x -> indices[x]).toArray()) {
+        for(int i: Arrays.stream(Utils.sortWithNoMissingValues(Arrays.stream(indices).mapToDouble(x ->
+                data.instance(x).value(attribute)).toArray())).map(x -> indices[x]).toArray()){
             Instance instance = data.instance(i);
-            if (instance.value(attribute) > previousValue) {
-                if (statsLeft.sumOfHessians != 0 && statsRight.sumOfHessians != 0 &&
-                        statsLeft.sumOfHessians >= min_child_weight && statsRight.sumOfHessians >= min_child_weight) {
-                    var splitQuality = splitQuality(initialStats, statsLeft, statsRight);
-                    if (splitQuality > splitSpecification.splitQuality) {
-                        splitSpecification.splitQuality = splitQuality;
-                        splitSpecification.splitPoint = (instance.value(attribute) + previousValue) / 2.0;
+            if(instance.value(attribute) > previousValue) {
+                if(statsLess.sumOfHessians != 0 && statsGreater.sumOfHessians != 0 &&
+                        statsLess.sumOfHessians >= min_child_weight && statsGreater.sumOfHessians >= min_child_weight){
+                    // debug the 3 values
+                    var lessthanQuality = ruleMetric(statsLess, ruleNum);
+                    var greaterthanQuality = ruleMetric(statsGreater, ruleNum);
+                    double quality;
+                    String lessOrGreater;
+                    if(lessthanQuality <= greaterthanQuality) {
+                        quality = greaterthanQuality;
+                        lessOrGreater = GREATER;
+                    } else {
+                        quality = lessthanQuality;
+                        lessOrGreater = LESS;
                     }
+                    if(quality > antecedentSpecification.splitQuality){
+                        antecedentSpecification.splitQuality = quality;
+                        antecedentSpecification.splitPoint = (instance.value(attribute) + previousValue) / 2.0;
+                        antecedentSpecification.lessOrGreater = lessOrGreater;
+                    }
+                    previousValue = instance.value(attribute);
+
                 }
-                previousValue = instance.value(attribute);
+                statsLess.updateStats(instance.classValue(), instance.weight(), true);
+                statsGreater.updateStats(instance.classValue(), instance.weight(), false);
             }
-            statsLeft.updateStats(instance.classValue(), instance.weight(), true);
-            statsRight.updateStats(instance.classValue(), instance.weight(), false);
         }
-        return splitSpecification;
+        return antecedentSpecification;
     }
 
     /**
      * Recursively grows a tree for a subset of data specified by the given indices.
      */
     private Node makeTree(int[] indices, int depth) {
-        var stats = new SufficientStatistics(0.0, 0.0);
-        for (int i : indices) {
+        var stats = new SufficientStatistics(0.0,0.0);
+        // calculate the stats for all instances
+        for (int i : indices){
             stats.updateStats(data.instance(i).classValue(), data.instance(i).weight(), true);
         }
-        if (stats.sumOfHessians <= 0.0 || stats.sumOfHessians < min_child_weight || depth >= max_depth) {
-            return new LeafNode(eta * stats.sumOfNegativeGradients / (stats.sumOfHessians + lambda));
+        // calculate prediction when rule stop
+        if(stats.sumOfHessians <= 0.0 || stats.sumOfHessians < min_child_weight || depth >= max_depth) {
+            return new ConsequenceNode(eta * stats.sumOfNegativeGradients / (stats.sumOfHessians + lambda));
         }
-        var bestSplitSpecification = new SplitSpecification(null, Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY);
+        var bestSplitSpecification = new AntecedentSpecification(null, Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY, LESS);
         List<Integer> attributes = new ArrayList<>(this.data.numAttributes() - 1);
-        for (int i = 0; i < data.numAttributes(); i++) {
-            if (i != this.data.classIndex()) {
+        for(int i = 0; i < data.numAttributes(); i ++){
+            if(i!= this.data.classIndex()){
                 attributes.add(i);
             }
         }
-        if (colsample_bynode < 1.0) {
+        if(colsample_bynode < 1.0){
             Collections.shuffle(attributes, random);
         }
-        for (Integer index : attributes.subList(0, (int) (colsample_bynode * attributes.size()))) {
-            var splitSpecification = findBestSplitPoint(indices, data.attribute(index), stats);
-            if (splitSpecification.splitQuality > bestSplitSpecification.splitQuality) {
-                bestSplitSpecification = splitSpecification;
+        for(Integer index: attributes.subList(0, (int) (colsample_bynode * attributes.size()))){
+            var antecedentSpecification = findBestAntecedent(indices, data.attribute(index), stats, depth);
+            if(antecedentSpecification.splitQuality > bestSplitSpecification.splitQuality) {
+                bestSplitSpecification = antecedentSpecification;
             }
         }
-        if (bestSplitSpecification.splitQuality <= 1e-6) {
-            return new LeafNode(eta * stats.sumOfNegativeGradients / (stats.sumOfHessians + lambda));
+        // check if improve meric
+        if(bestSplitSpecification.splitQuality - ruleMetric(stats, depth - 1) <= 1e-6) {
+            return new ConsequenceNode(eta * stats.sumOfNegativeGradients / (stats.sumOfHessians + lambda));
         } else {
-            var leftSubset = new ArrayList<Integer>(indices.length);
-            var rightSubset = new ArrayList<Integer>(indices.length);
+            var subset = new ArrayList<Integer>(indices.length);
             for (int i : indices) {
-                if (data.instance(i).value(bestSplitSpecification.attribute) < bestSplitSpecification.splitPoint) {
-                    leftSubset.add(i);
+                if (bestSplitSpecification.lessOrGreater == LESS) {
+                    if (data.instance(i).value(bestSplitSpecification.attribute) <= bestSplitSpecification.splitPoint) {
+                        subset.add(i);
+                    }
                 } else {
-                    rightSubset.add(i);
+                    if (data.instance(i).value(bestSplitSpecification.attribute) > bestSplitSpecification.splitPoint) {
+                        subset.add(i);
+                    }
                 }
             }
-            return new InternalNode(bestSplitSpecification.attribute, bestSplitSpecification.splitPoint,
-                    makeTree(leftSubset.stream().mapToInt(Integer::intValue).toArray(), depth + 1),
-                    makeTree(rightSubset.stream().mapToInt(Integer::intValue).toArray(), depth + 1));
+            return new AntecedentNode(bestSplitSpecification.attribute, bestSplitSpecification.splitPoint,
+                    makeTree(subset.stream().mapToInt(Integer::intValue).toArray(), depth + 1), bestSplitSpecification.lessOrGreater);
         }
     }
+
+
+
+
 
     /**
      * Returns the capabilities of the classifier: numeric predictors and numeric target.
@@ -276,13 +302,21 @@ public class XGBoostRule extends RandomizableClassifier implements WeightedInsta
      * Recursive method for obtaining a prediction from the tree attached to the node provided.
      */
     private double makePrediction(Node node, Instance instance) {
-        if (node instanceof LeafNode) {
-            return ((LeafNode) node).prediction;
-        } else if (node instanceof InternalNode) {
-            if (instance.value(((InternalNode) node).attribute) < ((InternalNode) node).splitPoint) {
-                return makePrediction(((InternalNode) node).leftSuccessor, instance);
+        if (node instanceof ConsequenceNode) {
+            return ((ConsequenceNode) node).prediction;
+        } else if (node instanceof AntecedentNode) {
+            if(((AntecedentNode) node).lessOrGreater == LESS) {
+                if (instance.value(((AntecedentNode) node).attribute) <= ((AntecedentNode) node).splitPoint) {
+                    return makePrediction(((AntecedentNode) node).successor, instance);
+                } else {
+                    return 0.0;
+                }
             } else {
-                return makePrediction(((InternalNode) node).rightSuccessor, instance);
+                if (instance.value(((AntecedentNode) node).attribute) > ((AntecedentNode) node).splitPoint) {
+                    return makePrediction(((AntecedentNode) node).successor, instance);
+                }else {
+                    return 0.0;
+                }
             }
         }
         return Utils.missingValue(); // This should never happen
@@ -299,23 +333,23 @@ public class XGBoostRule extends RandomizableClassifier implements WeightedInsta
      * Returns the number of leaves in the tree.
      */
     public int getNumLeaves(Node node) {
-        if (node instanceof LeafNode) {
+        if (node instanceof ConsequenceNode) {
             return 1;
         } else {
-            return getNumLeaves(((InternalNode)node).leftSuccessor) + getNumLeaves(((InternalNode)node).rightSuccessor);
+            return getNumLeaves(((AntecedentNode)node).successor);
         }
     }
 
     /**
      * Recursively produces the string representation of a branch in the tree.
      */
-    private void branchToString(StringBuffer sb, boolean left, int level, InternalNode node) {
+    private void branchToString(StringBuffer sb, boolean left, int level, AntecedentNode node) {
         sb.append("\n");
         for (int j = 0; j < level; j++) {
             sb.append("|   ");
         }
-        sb.append(node.attribute.name() + (left ? " < " : " >= ") + Utils.doubleToString(node.splitPoint, getNumDecimalPlaces()));
-        toString(sb, level + 1, left ? node.leftSuccessor : node.rightSuccessor);
+        sb.append(node.attribute.name() + (left ? LESS : GREATER) + Utils.doubleToString(node.splitPoint, getNumDecimalPlaces()));
+        toString(sb, level + 1, node.successor);
     }
 
     /**
@@ -323,11 +357,14 @@ public class XGBoostRule extends RandomizableClassifier implements WeightedInsta
      * Node) method for both branches, unless we are at a leaf.
      */
     private void toString(StringBuffer sb, int level, Node node) {
-        if (node instanceof LeafNode) {
-            sb.append(": " + Utils.doubleToString(((LeafNode) node).prediction, getNumDecimalPlaces()));
+        if (node instanceof ConsequenceNode) {
+            sb.append(": " + Utils.doubleToString(((ConsequenceNode) node).prediction, getNumDecimalPlaces()));
         } else {
-            branchToString(sb, true, level, (InternalNode) node);
-            branchToString(sb, false, level, (InternalNode) node);
+            if(((AntecedentNode) node).lessOrGreater == LESS) {
+                branchToString(sb, true, level, (AntecedentNode) node);
+            } else {
+                branchToString(sb, false, level, (AntecedentNode) node);
+            }
         }
     }
 
